@@ -16,7 +16,8 @@
     "check:witnesses": "node scripts/check-witnesses.mjs",
     "ci": "npm run toolchain && npm run compact && npm run check:witnesses && npm run typecheck && npm test",
     "check:mutants": "node scripts/mutation-check.mjs",
-    "check:grep": "bash scripts/pre-submit-grep.sh"
+    "check:grep": "bash scripts/pre-submit-grep.sh",
+    "test:coverage": "npm run test:coverage -w contract"
   },
   "overrides": {
     "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"
