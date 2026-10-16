@@ -5,14 +5,18 @@
   "license": "Apache-2.0",
   "description": "Sealed trading-card pools with provable draws on Midnight",
   "type": "module",
-  "workspaces": ["contract"],
+  "workspaces": [
+    "contract"
+  ],
   "scripts": {
     "toolchain": "bash scripts/setup-toolchain.sh",
     "compact": "npm run compact -w contract",
     "typecheck": "npm run typecheck -w contract",
     "test": "npm run test -w contract",
     "check:witnesses": "node scripts/check-witnesses.mjs",
-    "ci": "npm run toolchain && npm run compact && npm run check:witnesses && npm run typecheck && npm test"
+    "ci": "npm run toolchain && npm run compact && npm run check:witnesses && npm run typecheck && npm test",
+    "check:mutants": "node scripts/mutation-check.mjs",
+    "check:grep": "bash scripts/pre-submit-grep.sh"
   },
   "overrides": {
     "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"

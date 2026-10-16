@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Pinned Compact toolchain 0.31.1 (ledger 8). 0.34 and 0.35 target ledger 9
+      # and cannot deploy to Preview, Preprod or Mainnet today.
+      - name: Install Compact 0.31.1
+        run: bash scripts/setup-toolchain.sh
+
+      - run: npm ci
+
+      - name: Compile the contract (generates proving keys)
+        run: npm run compact
+
+      - name: Every declared witness is implemented
+        run: |
+          node scripts/check-witnesses.mjs --self-test
+          node scripts/check-witnesses.mjs
+
+      - run: npm run typecheck
+
+      - name: Tests (simulator, planted controls, properties)
+        run: npm run test:coverage
+
+      - name: Upload coverage summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: contract/coverage/coverage-summary.json
+
+      - name: No placeholder content in shipped files
+        run: bash scripts/pre-submit-grep.sh
+
+  # Breaks the contract on purpose and checks the tests notice (about 90 seconds).
+  mutation:
+    runs-on: ubuntu-latest
+    needs: contract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: bash scripts/setup-toolchain.sh
+      - run: npm ci
+      - run: npm run compact
+      - run: node scripts/mutation-check.mjs
