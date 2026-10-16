@@ -16,7 +16,7 @@ import { witnesses, type HakoPrivateState } from "../witnesses.js";
 import { type Pack } from "../pack.js";
 
 export class HakoSimulator {
-  readonly contract: Contract<HakoPrivateState>;
+  contract: Contract<HakoPrivateState>;
   circuitContext: CircuitContext<HakoPrivateState>;
   time = 0n;
 
@@ -37,6 +37,11 @@ export class HakoSimulator {
       currentQueryContext: new QueryContext(currentContractState.data, sampleContractAddress()),
     };
     this.setTime(startTime);
+  }
+
+  /** Replaces witnesses from now on, e.g. to feed tampered data into a real circuit. */
+  useWitnesses(overrides: Partial<typeof witnesses>): void {
+    this.contract = new Contract<HakoPrivateState>({ ...witnesses, ...overrides });
   }
 
   /** Moves the block clock; blockTimeLt / blockTimeGte read it. */

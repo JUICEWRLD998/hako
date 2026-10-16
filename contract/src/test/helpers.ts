@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { buildPack, sha256, type Card, type DrandConfig, QUICKNET } from "../pack.js";
 import { HakoSimulator } from "./hako.simulator.js";
+import type { witnesses } from "../witnesses.js";
 
 const enc = new TextEncoder();
 export const bytes = (s: string): Uint8Array => sha256(enc.encode(s));
@@ -13,9 +14,23 @@ export const DEMO_TIERS = [0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3];
 export const demoCards = (tiers = DEMO_TIERS, hits = [0, 1]): Card[] =>
   tiers.map((tier, i) => ({ id: bytes(`card-${i}`), tier, advertised: hits.includes(i) }));
 
-export const newSim = (cards = demoCards(), drand: DrandConfig = QUICKNET, startTime = 1_700_000_000n) => {
+export const newSim = (
+  cards = demoCards(),
+  drand: DrandConfig = QUICKNET,
+  startTime = 1_700_000_000n,
+  overrides: Partial<typeof witnesses> = {},
+) => {
   const { pack, params } = buildPack(OPERATOR_KEY, cards, drand);
-  return { sim: new HakoSimulator(pack, params, startTime), pack, params };
+  return { sim: new HakoSimulator(pack, params, startTime, overrides), pack, params };
+};
+
+/** A sealed, finalized 12-card pack ready for requests. */
+export const openPack = (overrides: Partial<typeof witnesses> = {}) => {
+  const ctx = newSim();
+  sealAll(ctx.sim, 12);
+  ctx.sim.finalizeSeal();
+  ctx.sim.useWitnesses(overrides);
+  return ctx;
 };
 
 export const sealAll = (sim: HakoSimulator, n: number): void => {
