@@ -1,0 +1,20 @@
+{
+  "name": "hako",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Sealed trading-card pools with provable draws on Midnight",
+  "type": "module",
+  "workspaces": ["contract"],
+  "scripts": {
+    "toolchain": "bash scripts/setup-toolchain.sh",
+    "compact": "npm run compact -w contract",
+    "typecheck": "npm run typecheck -w contract",
+    "test": "npm run test -w contract",
+    "check:witnesses": "node scripts/check-witnesses.mjs",
+    "ci": "npm run toolchain && npm run compact && npm run check:witnesses && npm run typecheck && npm test"
+  },
+  "overrides": {
+    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"
+  }
+}

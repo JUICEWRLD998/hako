@@ -1,0 +1,25 @@
+{
+  "name": "@hako/contract",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "compact": "bash ../scripts/compactc.sh src/hako.compact src/managed/hako",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "rm -rf dist && tsc --project tsconfig.build.json"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@midnight-ntwrk/midnight-js-protocol": "4.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "fast-check": "^3.23.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
