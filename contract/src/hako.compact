@@ -1,0 +1,74 @@
+// Copyright 2026 Mustapha Fadhlullah
+// SPDX-License-Identifier: Apache-2.0
+//
+// HAKO: sealed trading-card pools with provable draws.
+// One contract = one pack. See implementation.md section 3.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+export enum Phase { SEALING, OPEN, CLOSED }
+
+// A card as the operator knows it. adv = 0: not advertised; adv = k + 1: advertised leaf k.
+export struct Item {
+  id: Bytes<32>;
+  tier: Uint<8>;
+  adv: Uint<8>;
+}
+
+// The hidden tally: how many cards of each tier are still sealed, and which
+// advertised hits are still inside. Only its commitment is public.
+export struct Tally {
+  tiers: Vector<4, Uint<16>>;
+  inside: Vector<16, Boolean>;
+}
+
+// ---- public ledger (implementation.md 3b) ----
+export ledger operator: Bytes<32>;
+export ledger phase: Phase;
+export ledger packSize: Uint<16>;
+export ledger tierTargets: Vector<4, Uint<16>>;
+export ledger advertised: MerkleTree<4, Bytes<32>>;
+export ledger advertisedCount: Uint<8>;
+export ledger slots: Map<Uint<16>, Bytes<32>>;
+export ledger sealedCount: Counter;
+export ledger remaining: Uint<16>;
+export ledger tallyCommit: Bytes<32>;
+export ledger seedTip: Bytes<32>;
+
+// ---- witnesses (implementation.md 3c) ----
+witness operatorSecret(): Bytes<32>;
+witness freshRand(): Bytes<32>;
+
+export pure circuit operatorKey(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "hako:op"), sk]);
+}
+
+export pure circuit zeroTally(): Tally {
+  return Tally {
+    tiers: [0, 0, 0, 0],
+    inside: [false, false, false, false, false, false, false, false,
+             false, false, false, false, false, false, false, false]
+  };
+}
+
+constructor(
+  size: Uint<16>,
+  targets: Vector<4, Uint<16>>,
+  hitLeaves: Vector<16, Bytes<32>>,
+  hitCount: Uint<8>,
+  seedTip0: Bytes<32>
+) {
+  operator = disclose(operatorKey(operatorSecret()));
+  phase = Phase.SEALING;
+  packSize = disclose(size);
+  tierTargets = disclose(targets);
+  advertisedCount = disclose(hitCount);
+  for (const leaf of hitLeaves) {
+    advertised.insert(disclose(leaf));
+  }
+  remaining = 0;
+  seedTip = disclose(seedTip0);
+  tallyCommit = persistentCommit<Tally>(zeroTally(), freshRand());
+}
