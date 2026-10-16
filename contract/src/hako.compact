@@ -8,7 +8,7 @@ pragma language_version 0.23;
 
 import CompactStandardLibrary;
 
-export enum Phase { SEALING, OPEN, CLOSED }
+export enum Phase { SEALING, OPEN, CLOSING, CLOSED }
 
 // A card as the operator knows it. adv = 0: not advertised; adv = k + 1: advertised leaf k.
 export struct Item {
@@ -197,6 +197,12 @@ circuit assertOperator(): [] {
   assert(operatorKey(operatorSecret()) == operator, "caller is not the operator");
 }
 
+// Version of the next tally commitment: how many tally-changing operations have happened, plus one.
+// The operator derives its commitment randomness from this, so it can resume from the ledger alone.
+circuit nextVersion(): Uint<64> {
+  return (sealedCount.read() + results.size() + revealed.size() + 1) as Uint<64>;
+}
+
 // Opens the committed tally; fails if the operator's private tally is stale.
 circuit openTally(): Tally {
   const [t, r] = currentTally();
@@ -243,9 +249,10 @@ export circuit sealSlot(): [] {
 
   const t = openTally();
   const next = tallyAdd(t, it);
+  const version = nextVersion();
   slots.insert(disclose(slot as Uint<16>), disclose(persistentCommit<Item>(it, salt)));
   sealedCount.increment(1);
-  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand((slot + 1) as Uint<64>)));
+  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand(version)));
 }
 
 export circuit finalizeSeal(): [] {
@@ -307,6 +314,7 @@ export circuit fulfillDraw(drand: Bytes<32>): [] {
 
   const t = openTally();
   const next = tallySub(t, it);
+  const version = nextVersion();
 
   results.insert(id, DrawResult { slot: slot, leaf: leaf, link: disclose(link), drand: disclose(drand) });
   seedTip = disclose(link);
@@ -315,7 +323,7 @@ export circuit fulfillDraw(drand: Bytes<32>): [] {
   slots.remove(last);
   remaining = last;
   nextFulfil.increment(1);
-  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand((packSize + id + 1) as Uint<64>)));
+  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand(version)));
 }
 
 // ---- statements about the hidden tally ----
@@ -381,7 +389,7 @@ export circuit refundStalled(idIn: Uint<32>): [] {
 // Opens the last sealed card publicly. Closing the pack early reveals what is left.
 export circuit unsealOne(): [] {
   assertOperator();
-  assert(phase == Phase.OPEN, "pack is not open");
+  assert(phase == Phase.OPEN || phase == Phase.CLOSING, "pack is not open");
   assert(nextFulfil.read() == nextRequest.read(), "requests are still waiting");
   assert(remaining > 0, "nothing left to unseal");
   const slot = (remaining - 1) as Uint<16>;
@@ -389,11 +397,11 @@ export circuit unsealOne(): [] {
   assert(persistentCommit<Item>(it, salt) == slots.lookup(slot), "private card does not open the slot");
   const t = openTally();
   const next = tallySub(t, it);
+  const version = nextVersion();
   revealed.insert(slot, disclose(it));
   slots.remove(slot);
   remaining = slot;
-  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand((packSize + nextRequest.read() + 1 + slot) as Uint<64>)));
-  if (slot == 0) {
-    phase = Phase.CLOSED;
-  }
+  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand(version)));
+  // Once unsealing starts no new draws are allowed, so draws always replay before unseals.
+  phase = slot == 0 ? Phase.CLOSED : Phase.CLOSING;
 }
