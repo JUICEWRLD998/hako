@@ -24,6 +24,45 @@ export struct Tally {
   inside: Vector<16, Boolean>;
 }
 
+// A buyer's pending request. The tag hides the buyer; the seed is the buyer's die.
+export struct DrawRequest {
+  buyerTag: Bytes<32>;
+  buyerSeed: Bytes<32>;
+  drandRound: Uint<64>;
+  deadline: Uint<64>;
+  refunded: Boolean;
+}
+
+// What a fulfilled draw publishes: everything needed to recompute the slot.
+export struct DrawResult {
+  slot: Uint<16>;
+  leaf: Bytes<32>;
+  link: Bytes<32>;
+  drand: Bytes<32>;
+}
+
+// A proven claim about the hidden tally, e.g. "advertised hit #3 is still inside".
+export struct Statement {
+  kind: Uint<8>;
+  a: Uint<8>;
+  b: Uint<16>;
+  at: Uint<64>;
+}
+
+export struct Params {
+  size: Uint<16>;
+  targets: Vector<4, Uint<16>>;
+  hitLeaves: Vector<16, Bytes<32>>;
+  hitCount: Uint<8>;
+  seedTip0: Bytes<32>;
+  drandGenesis: Uint<64>;
+  drandPeriod: Uint<64>;
+  lead: Uint<64>;
+  grace: Uint<64>;
+}
+
+// Statement kinds: 1 = STILL_INSIDE (a = advertised index), 2 = AT_LEAST (a = tier, b = count).
+
 // ---- public ledger (implementation.md 3b) ----
 export ledger operator: Bytes<32>;
 export ledger phase: Phase;
@@ -36,39 +75,325 @@ export ledger sealedCount: Counter;
 export ledger remaining: Uint<16>;
 export ledger tallyCommit: Bytes<32>;
 export ledger seedTip: Bytes<32>;
+export ledger drandGenesis: Uint<64>;
+export ledger drandPeriod: Uint<64>;
+export ledger requestLead: Uint<64>;
+export ledger requestGrace: Uint<64>;
+export ledger requests: Map<Uint<32>, DrawRequest>;
+export ledger results: Map<Uint<32>, DrawResult>;
+export ledger nextRequest: Counter;
+export ledger nextFulfil: Counter;
+export ledger statements: Map<Uint<32>, Statement>;
+export ledger nextStatement: Counter;
+export ledger claimed: Set<Bytes<32>>;
+export ledger stalled: Counter;
+export ledger revealed: Map<Uint<16>, Item>;
 
 // ---- witnesses (implementation.md 3c) ----
 witness operatorSecret(): Bytes<32>;
-witness freshRand(): Bytes<32>;
+witness slotOpening(slot: Uint<16>): [Item, Bytes<32>];
+witness currentTally(): [Tally, Bytes<32>];
+witness freshRand(label: Uint<64>): Bytes<32>;
+witness nextSeedLink(): Bytes<32>;
+witness advertisedPath(leaf: Uint<8>): MerkleTreePath<4, Bytes<32>>;
+witness indexParts(word: Uint<64>, modulus: Uint<16>): [Uint<64>, Uint<16>];
+witness buyerSecret(): [Bytes<32>, Bytes<32>];
+witness buyerOpening(): [Item, Bytes<32>];
 
+// ---- pure helpers, exported so TypeScript (and the /verify page) reuse them ----
 export pure circuit operatorKey(sk: Bytes<32>): Bytes<32> {
   return persistentHash<Vector<2, Bytes<32>>>([pad(32, "hako:op"), sk]);
+}
+
+export pure circuit hitLeaf(id: Bytes<32>, tier: Uint<8>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "hako:hit"), id, tier as Field as Bytes<32>]);
+}
+
+export pure circuit buyerTagOf(secret: Bytes<32>, nonce: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "hako:buyer"), secret, nonce]);
+}
+
+export pure circuit claimNullifierOf(secret: Bytes<32>, nonce: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "hako:claim"), secret, nonce]);
+}
+
+export pure circuit seedLinkHash(link: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "hako:seed"), link]);
+}
+
+// The three dice, hashed together.
+export pure circuit drawDigest(link: Bytes<32>, buyerSeed: Bytes<32>, drand: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<4, Bytes<32>>>([pad(32, "hako:draw"), link, buyerSeed, drand]);
+}
+
+// First 8 bytes of the digest as a 64-bit word. slot = drawWord mod remaining.
+export pure circuit drawWord(digest: Bytes<32>): Uint<64> {
+  const v = digest as Vector<32, Uint<8>>;
+  const eight: Vector<8, Uint<8>> = [v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]];
+  return (eight as Bytes<8>) as Uint<64>;
+}
+
+export pure circuit roundTime(genesis: Uint<64>, period: Uint<64>, round: Uint<64>): Uint<64> {
+  assert(round >= 1, "drand rounds start at 1");
+  return (genesis + (round - 1) * period) as Uint<64>;
 }
 
 export pure circuit zeroTally(): Tally {
   return Tally {
     tiers: [0, 0, 0, 0],
-    inside: [false, false, false, false, false, false, false, false,
-             false, false, false, false, false, false, false, false]
+    inside: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
   };
 }
 
-constructor(
-  size: Uint<16>,
-  targets: Vector<4, Uint<16>>,
-  hitLeaves: Vector<16, Bytes<32>>,
-  hitCount: Uint<8>,
-  seedTip0: Bytes<32>
-) {
+// ---- tally arithmetic: no dynamic indexing, so every cell is touched ----
+circuit bumpTier(c: Uint<16>, t: Uint<8>, k: Uint<8>): Uint<16> {
+  const inc: Uint<16> = t == k ? 1 : 0;
+  return (c + inc) as Uint<16>;
+}
+
+circuit takeTier(c: Uint<16>, t: Uint<8>, k: Uint<8>): Uint<16> {
+  const dec: Uint<16> = t == k ? 1 : 0;
+  assert(c >= dec, "tier already empty");
+  return (c - dec) as Uint<16>;
+}
+
+circuit setFlag(f: Boolean, adv: Uint<8>, kPlusOne: Uint<8>): Boolean {
+  const hit = adv == kPlusOne;
+  assert(!(f && hit), "hit already counted inside");
+  return f || hit;
+}
+
+circuit clearFlag(f: Boolean, adv: Uint<8>, kPlusOne: Uint<8>): Boolean {
+  const hit = adv == kPlusOne;
+  assert(!hit || f, "hit is not inside");
+  return f && !hit;
+}
+
+circuit tallyAdd(t: Tally, it: Item): Tally {
+  return Tally {
+    tiers: [bumpTier(t.tiers[0], it.tier, 0), bumpTier(t.tiers[1], it.tier, 1), bumpTier(t.tiers[2], it.tier, 2), bumpTier(t.tiers[3], it.tier, 3)],
+    inside: [setFlag(t.inside[0], it.adv, 1), setFlag(t.inside[1], it.adv, 2), setFlag(t.inside[2], it.adv, 3), setFlag(t.inside[3], it.adv, 4), setFlag(t.inside[4], it.adv, 5), setFlag(t.inside[5], it.adv, 6), setFlag(t.inside[6], it.adv, 7), setFlag(t.inside[7], it.adv, 8), setFlag(t.inside[8], it.adv, 9), setFlag(t.inside[9], it.adv, 10), setFlag(t.inside[10], it.adv, 11), setFlag(t.inside[11], it.adv, 12), setFlag(t.inside[12], it.adv, 13), setFlag(t.inside[13], it.adv, 14), setFlag(t.inside[14], it.adv, 15), setFlag(t.inside[15], it.adv, 16)]
+  };
+}
+
+circuit tallySub(t: Tally, it: Item): Tally {
+  return Tally {
+    tiers: [takeTier(t.tiers[0], it.tier, 0), takeTier(t.tiers[1], it.tier, 1), takeTier(t.tiers[2], it.tier, 2), takeTier(t.tiers[3], it.tier, 3)],
+    inside: [clearFlag(t.inside[0], it.adv, 1), clearFlag(t.inside[1], it.adv, 2), clearFlag(t.inside[2], it.adv, 3), clearFlag(t.inside[3], it.adv, 4), clearFlag(t.inside[4], it.adv, 5), clearFlag(t.inside[5], it.adv, 6), clearFlag(t.inside[6], it.adv, 7), clearFlag(t.inside[7], it.adv, 8), clearFlag(t.inside[8], it.adv, 9), clearFlag(t.inside[9], it.adv, 10), clearFlag(t.inside[10], it.adv, 11), clearFlag(t.inside[11], it.adv, 12), clearFlag(t.inside[12], it.adv, 13), clearFlag(t.inside[13], it.adv, 14), clearFlag(t.inside[14], it.adv, 15), clearFlag(t.inside[15], it.adv, 16)]
+  };
+}
+
+circuit insideAt(t: Tally, k: Uint<8>): Boolean {
+  const picks: Vector<16, Boolean> = [(k == 0 && t.inside[0]), (k == 1 && t.inside[1]), (k == 2 && t.inside[2]), (k == 3 && t.inside[3]), (k == 4 && t.inside[4]), (k == 5 && t.inside[5]), (k == 6 && t.inside[6]), (k == 7 && t.inside[7]), (k == 8 && t.inside[8]), (k == 9 && t.inside[9]), (k == 10 && t.inside[10]), (k == 11 && t.inside[11]), (k == 12 && t.inside[12]), (k == 13 && t.inside[13]), (k == 14 && t.inside[14]), (k == 15 && t.inside[15])];
+  return fold((acc: Boolean, x: Boolean): Boolean => acc || x, false, picks);
+}
+
+circuit tierAt(t: Tally, k: Uint<8>): Uint<16> {
+  const picks: Vector<4, Uint<16>> = [((k == 0) ? t.tiers[0] : 0), ((k == 1) ? t.tiers[1] : 0), ((k == 2) ? t.tiers[2] : 0), ((k == 3) ? t.tiers[3] : 0)];
+  return fold((acc: Uint<16>, x: Uint<16>): Uint<16> => (acc + x) as Uint<16>, 0, picks);
+}
+
+circuit assertOperator(): [] {
+  assert(operatorKey(operatorSecret()) == operator, "caller is not the operator");
+}
+
+// Opens the committed tally; fails if the operator's private tally is stale.
+circuit openTally(): Tally {
+  const [t, r] = currentTally();
+  assert(persistentCommit<Tally>(t, r) == tallyCommit, "private tally does not open the commitment");
+  return t;
+}
+
+constructor(p: Params) {
   operator = disclose(operatorKey(operatorSecret()));
   phase = Phase.SEALING;
-  packSize = disclose(size);
-  tierTargets = disclose(targets);
-  advertisedCount = disclose(hitCount);
-  for (const leaf of hitLeaves) {
+  packSize = disclose(p.size);
+  tierTargets = disclose(p.targets);
+  advertisedCount = disclose(p.hitCount);
+  for (const leaf of p.hitLeaves) {
     advertised.insert(disclose(leaf));
   }
   remaining = 0;
-  seedTip = disclose(seedTip0);
-  tallyCommit = persistentCommit<Tally>(zeroTally(), freshRand());
+  seedTip = disclose(p.seedTip0);
+  drandGenesis = disclose(p.drandGenesis);
+  drandPeriod = disclose(p.drandPeriod);
+  requestLead = disclose(p.lead);
+  requestGrace = disclose(p.grace);
+  tallyCommit = disclose(persistentCommit<Tally>(zeroTally(), freshRand(0)));
+}
+
+// ---- sealing ----
+export circuit sealSlot(): [] {
+  assertOperator();
+  assert(phase == Phase.SEALING, "pack is not being sealed");
+  const slot = sealedCount.read();
+  assert(slot < packSize, "pack is full");
+
+  const [it, salt] = slotOpening(slot as Uint<16>);
+  assert(it.tier < 4, "tier out of range");
+  assert(it.adv <= 16, "advertised index out of range");
+
+  // Runs on every call, hit or not, so the transcript never shows which slot holds a hit.
+  const k: Uint<8> = it.adv == 0 ? 0 : (it.adv - 1) as Uint<8>;
+  const path = advertisedPath(k);
+  assert(advertised.checkRoot(disclose(merkleTreePathRoot<4, Bytes<32>>(path))), "advertised path is not in the tree");
+  assert(it.adv == 0 || path.leaf == hitLeaf(it.id, it.tier), "item is not the advertised hit it claims to be");
+  const inLineup = it.adv <= advertisedCount;
+  assert(it.adv == 0 || inLineup, "advertised index beyond the lineup");
+
+  const t = openTally();
+  const next = tallyAdd(t, it);
+  slots.insert(disclose(slot as Uint<16>), disclose(persistentCommit<Item>(it, salt)));
+  sealedCount.increment(1);
+  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand((slot + 1) as Uint<64>)));
+}
+
+export circuit finalizeSeal(): [] {
+  assertOperator();
+  assert(phase == Phase.SEALING, "pack is not being sealed");
+  assert(sealedCount.read() == packSize, "not every slot is sealed");
+  const t = openTally();
+  assert(t.tiers == tierTargets, "sealed tier counts differ from the advertised lineup");
+  for (const i of 0..16) {
+    assert(t.inside[i] == (i < advertisedCount), "advertised hit missing or unexpected");
+  }
+  phase = Phase.OPEN;
+  remaining = packSize;
+}
+
+// ---- drawing ----
+export circuit requestDraw(tag: Bytes<32>, buyerSeed: Bytes<32>, roundIn: Uint<64>): [] {
+  const round = disclose(roundIn);
+  assertOperator();
+  assert(phase == Phase.OPEN, "pack is not open");
+  const pending = nextRequest.read() - nextFulfil.read();
+  assert(pending < remaining, "more requests than cards left");
+  const at = roundTime(drandGenesis, drandPeriod, round);
+  assert(at >= requestLead, "round is too early");
+  // The drand round must still be in the future when the request lands.
+  assert(blockTimeLt((at - requestLead) as Uint<64>), "drand round is no longer in the future");
+  requests.insert(
+    disclose(nextRequest.read() as Uint<32>),
+    DrawRequest {
+      buyerTag: disclose(tag),
+      buyerSeed: disclose(buyerSeed),
+      drandRound: disclose(round),
+      deadline: disclose((at + requestGrace) as Uint<64>),
+      refunded: false
+    }
+  );
+  nextRequest.increment(1);
+}
+
+export circuit fulfillDraw(drand: Bytes<32>): [] {
+  assertOperator();
+  assert(phase == Phase.OPEN, "pack is not open");
+  const id = nextFulfil.read() as Uint<32>;
+  assert(nextFulfil.read() < nextRequest.read(), "no request waiting");
+  const req = requests.lookup(id);
+
+  const link = nextSeedLink();
+  assert(seedLinkHash(link) == seedTip, "seed link does not extend the chain");
+
+  const word = drawWord(drawDigest(link, req.buyerSeed, drand));
+  const [q, r] = indexParts(word, remaining);
+  assert(r < remaining, "remainder out of range");
+  assert(word == q * remaining + r, "index is not word mod remaining");
+  const slot = disclose(r);
+
+  const [it, salt] = slotOpening(slot);
+  const leaf = slots.lookup(slot);
+  assert(persistentCommit<Item>(it, salt) == leaf, "private card does not open the slot");
+
+  const t = openTally();
+  const next = tallySub(t, it);
+
+  results.insert(id, DrawResult { slot: slot, leaf: leaf, link: disclose(link), drand: disclose(drand) });
+  seedTip = disclose(link);
+  const last = (remaining - 1) as Uint<16>;
+  slots.insert(slot, slots.lookup(last));
+  slots.remove(last);
+  remaining = last;
+  nextFulfil.increment(1);
+  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand((packSize + id + 1) as Uint<64>)));
+}
+
+// ---- statements about the hidden tally ----
+export circuit proveStillInside(kIn: Uint<8>): [] {
+  const k = disclose(kIn);
+  assertOperator();
+  assert(k < 16, "advertised index out of range");
+  const t = openTally();
+  assert(insideAt(t, k), "that hit is not inside");
+  statements.insert(
+    disclose(nextStatement.read() as Uint<32>),
+    Statement { kind: 1, a: disclose(k), b: 0, at: nextFulfil.read() }
+  );
+  nextStatement.increment(1);
+}
+
+export circuit proveAtLeast(tierIn: Uint<8>, nIn: Uint<16>): [] {
+  const tier = disclose(tierIn);
+  const n = disclose(nIn);
+  assertOperator();
+  assert(tier < 4, "tier out of range");
+  const t = openTally();
+  assert(tierAt(t, tier) >= n, "fewer cards than claimed");
+  statements.insert(
+    disclose(nextStatement.read() as Uint<32>),
+    Statement { kind: 2, a: disclose(tier), b: disclose(n), at: nextFulfil.read() }
+  );
+  nextStatement.increment(1);
+}
+
+// ---- claims, refunds, closing ----
+export circuit claimItem(idIn: Uint<32>): [] {
+  const id = disclose(idIn);
+  const [secret, nonce] = buyerSecret();
+  assert(buyerTagOf(secret, nonce) == requests.lookup(id).buyerTag, "not the buyer of this draw");
+  const [it, salt] = buyerOpening();
+  assert(persistentCommit<Item>(it, salt) == results.lookup(id).leaf, "opening does not match the drawn card");
+  const n = claimNullifierOf(secret, nonce);
+  assert(!claimed.member(disclose(n)), "already claimed");
+  claimed.insert(disclose(n));
+}
+
+export circuit refundStalled(idIn: Uint<32>): [] {
+  const id = disclose(idIn);
+  assert(nextFulfil.read() < nextRequest.read(), "nothing is waiting");
+  assert(id == (nextFulfil.read() as Uint<32>), "only the oldest request can be refunded");
+  const req = requests.lookup(id);
+  assert(blockTimeGte(req.deadline), "deadline has not passed");
+  requests.insert(
+    id,
+    DrawRequest {
+      buyerTag: req.buyerTag,
+      buyerSeed: req.buyerSeed,
+      drandRound: req.drandRound,
+      deadline: req.deadline,
+      refunded: true
+    }
+  );
+  nextFulfil.increment(1);
+  stalled.increment(1);
+}
+
+// Opens the last sealed card publicly. Closing the pack early reveals what is left.
+export circuit unsealOne(): [] {
+  assertOperator();
+  assert(phase == Phase.OPEN, "pack is not open");
+  assert(nextFulfil.read() == nextRequest.read(), "requests are still waiting");
+  assert(remaining > 0, "nothing left to unseal");
+  const slot = (remaining - 1) as Uint<16>;
+  const [it, salt] = slotOpening(slot);
+  assert(persistentCommit<Item>(it, salt) == slots.lookup(slot), "private card does not open the slot");
+  const t = openTally();
+  const next = tallySub(t, it);
+  revealed.insert(slot, disclose(it));
+  slots.remove(slot);
+  remaining = slot;
+  tallyCommit = disclose(persistentCommit<Tally>(next, freshRand((packSize + nextRequest.read() + 1 + slot) as Uint<64>)));
+  if (slot == 0) {
+    phase = Phase.CLOSED;
+  }
 }
