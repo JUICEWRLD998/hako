@@ -1,0 +1,33 @@
+{
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true,
+    "ecc@ecc": true,
+    "midnight-expert@midnight-expert": true,
+    "compact-core@midnight-expert": true,
+    "compact-examples@midnight-expert": true,
+    "core-concepts@midnight-expert": true,
+    "midnight-plugin-utils@midnight-expert": true,
+    "midnight-tooling@midnight-expert": true,
+    "midnight-verify@midnight-expert": true,
+    "midnight-cq@midnight-expert": true,
+    "midnight-wallet@midnight-expert": true,
+    "midnight-fact-check@midnight-expert": true,
+    "compact-cli-dev@midnight-expert": true,
+    "midnight-dapp-dev@midnight-expert": true,
+    "midnight-status-codes@midnight-expert": true,
+    "proof-server@midnight-expert": true,
+    "midnight-indexer@midnight-expert": true,
+    "midnight-node@midnight-expert": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": { "source": "github", "repo": "anthropics/claude-plugins-official" }
+    },
+    "ecc": {
+      "source": { "source": "git", "url": "https://github.com/affaan-m/ECC.git" }
+    },
+    "midnight-expert": {
+      "source": { "source": "github", "repo": "midnightntwrk/midnight-expert" }
+    }
+  }
+}
